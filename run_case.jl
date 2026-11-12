@@ -15,8 +15,6 @@
 #     TABLES_MAX_DZ          largest vertical spacing in m (default: 40)
 #     TABLES_DT              time step in s (default: 0.2)
 #     TABLES_STOP_TIME       duration in s (default: 10800)
-#     TABLES_AVERAGING       averaging of the dynamic Smagorinsky coefficient: lagrangian or y
-#                            (default: lagrangian for flat cases; ridge cases require y)
 #     TABLES_OUTPUT_DIR      output directory (default: output)
 #     TABLES_PICKUP          true to restart from the latest checkpoint (default: false)
 
@@ -51,15 +49,11 @@ z_faces = vertical_faces(spacing = setting(Float64, "TABLES_DZ", 10),
 case = tables_case(case_name, FT)
 grid = tables_grid(arch, FT, case; Nx, Ny, Δx, z_faces)
 
-default_averaging = case.ridge_height == 0 ? "lagrangian" : "y"
-averaging = get(ENV, "TABLES_AVERAGING", default_averaging) == "lagrangian" ? LagrangianAveraging() : 2
-closure = tables_closure(grid; averaging)
-
 # In single precision the increments of a 0.2 s step are close to the resolution of ρθ.
 # Stochastic rounding removes the resulting bias (see "Round-off in reduced precision" in the Breeze docs).
 timestepper_kwargs = FT === Float32 ? (; rounding = StochasticRounding()) : NamedTuple()
 
-model = tables_model(grid, case; closure, timestepper_kwargs)
+model = tables_model(grid, case; timestepper_kwargs)
 set_tables_initial_condition!(model, case)
 
 @info "TABLES case $case_name" grid model
@@ -80,9 +74,8 @@ iterations(interval) = max(1, round(Int, interval / Δt))
 
 u, v, w = model.velocities
 θ = model.formulation.potential_temperature
-νₑ = model.closure_fields.νₑ
 
-outputs = (; u, v, w, θ, νₑ, ww = w^2, wθ = w * θ)
+outputs = (; u, v, w, θ, ww = w^2, wθ = w * θ)
 
 # Averages along the ridge, on model levels, every 10 minutes
 sections = NamedTuple(name => Average(@at((Center, Center, Center), outputs[name]), dims = 2)

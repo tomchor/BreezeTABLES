@@ -5,18 +5,21 @@
 # numbers in the comments below refer to that document.
 #
 # Configuration: fully compressible dynamics with acoustic substepping, a terrain-following
-# (Gal-Chen) vertical coordinate for the ridge cases, dynamic Smagorinsky subfilter-scale
-# closure, and a neutral log-law wall model.
+# (Gal-Chen) vertical coordinate for the ridge cases, fifth-order WENO advection with no explicit
+# subfilter-scale closure (implicit large-eddy simulation), and a neutral log-law wall model.
+#
+# TODO: once all cases work, consider adding an explicit subfilter-scale closure. The protocol
+# requests subfilter-scale stresses, heat fluxes and dissipation (Section 3), which an implicit
+# closure does not provide.
 
 using Breeze
 using Oceananigans
 using Oceananigans.Units
 using Oceananigans.Architectures: architecture, on_architecture
-using Oceananigans.Grids: znode, minimum_xspacing, minimum_yspacing, minimum_zspacing
+using Oceananigans.Grids: znode
 using Oceananigans.Operators: ℑxᶠᵃᵃ, ℑyᵃᶠᵃ, ℑxyᶠᶜᵃ, ℑxyᶜᶠᵃ, Δzᶠᶜᶜ, Δzᶜᶠᶜ
-using Oceananigans.TurbulenceClosures.Smagorinskys: LagrangianAveraging, LagrangianAveragedDynamicSmagorinsky
 using Breeze.TerrainFollowingDiscretization: TerrainFollowingVerticalDiscretization, LinearDecay,
-                                             TerrainFollowingGrid, materialize_terrain!
+                                             materialize_terrain!
 using Printf
 using Random
 
@@ -161,18 +164,20 @@ function vertical_faces(; height = 5000, spacing = 10, uniform_height = 3000, st
 end
 
 """
-    tables_grid(arch, FT, case; Nx=512, Ny=1024, Δx=20, z_faces=vertical_faces())
+    tables_grid(arch, FT, case; Nx=512, Ny=1024, Δx=20, z_faces=vertical_faces(), halo=(3, 3, 3))
 
 Return the grid of a TABLES `case`. The domain is periodic in `x` and `y`. Cases with a ridge use a
 terrain-following vertical coordinate with linear decay (Gal-Chen and Somerville 1975), for which
 the vertical spacing is the reference spacing times `1 - h / height`. The ridge is
 `h(x) = ridge_height / 2 * (1 - cos(2π x / Lx))`, with the valley at `x = 0`.
+
+The default `halo` of three cells is what `WENO(order=5)` requires.
 """
-function tables_grid(arch, FT, case; Nx = 512, Ny = 1024, Δx = 20, z_faces = vertical_faces())
+function tables_grid(arch, FT, case; Nx = 512, Ny = 1024, Δx = 20, z_faces = vertical_faces(), halo = (3, 3, 3))
     Lx = Nx * Δx
     Ly = Ny * Δx
     Nz = length(z_faces) - 1
-    horizontal = (x = (0, Lx), y = (0, Ly), halo = (5, 5, 5), topology = (Periodic, Periodic, Bounded))
+    horizontal = (; x = (0, Lx), y = (0, Ly), halo, topology = (Periodic, Periodic, Bounded))
 
     if case.ridge_height == 0
         return RectilinearGrid(arch, FT; size = (Nx, Ny, Nz), z = z_faces, horizontal...)
@@ -253,93 +258,19 @@ end
 end
 
 #####
-##### Subfilter-scale closure (Section 1.9)
-#####
-
-"""
-    tables_closure(grid; averaging = LagrangianAveraging(), kwargs...)
-
-Return the scale-invariant dynamic Smagorinsky closure of Bou-Zeid et al. (2005) as implemented in
-Oceananigans. `averaging` selects how the Germano-identity products are averaged:
-`LagrangianAveraging()` along fluid trajectories, or a dimension such as `2` for averaging along `y`,
-the homogeneous direction of all TABLES cases. Other keyword arguments are forwarded to
-`DynamicSmagorinsky`.
-
-Two properties of the Oceananigans 0.117 implementation matter here:
-
-- With Lagrangian averaging, the previous averages are interpolated at the physical height of the
-  upstream point, but `interpolate` reads its third coordinate as the reference coordinate. On a
-  terrain-following grid the two differ by the local terrain displacement, so the average is taken
-  from the wrong level. This function therefore rejects Lagrangian averaging on terrain grids.
-
-- The coefficient is `max(𝒥ᴸᴹ, minimum_numerator) / 𝒥ᴹᴹ` with `minimum_numerator = 1e-32` by
-  default. With directional averaging, a region whose strain rate is at round-off level has `𝒥ᴹᴹ`
-  far below that floor, which produces an eddy viscosity of order 10¹⁴ m² s⁻¹ and a failure at
-  the first time step. Directional averaging therefore uses `minimum_numerator = 0`, which clips
-  negative coefficients at zero and nothing else. Lagrangian averaging needs the positive floor
-  (see `seed_lagrangian_averages!`).
-
-A directionally averaged coefficient has no memory. In the laminar initial flow over the 100 m
-ridge it gave an eddy viscosity of several hundred m² s⁻¹ at the first step of a coarse test
-(640 m by 100 m cells). Check the first steps at production resolution before running ridge cases.
-"""
-function tables_closure(grid; averaging = LagrangianAveraging(), kwargs...)
-    if averaging isa LagrangianAveraging
-        grid isa TerrainFollowingGrid &&
-            throw(ArgumentError("Lagrangian averaging of the dynamic Smagorinsky coefficient is not correct on a " *
-                                "terrain-following grid with Oceananigans 0.117. Use averaging = 2 (along y)."))
-        return DynamicSmagorinsky(; averaging, kwargs...)
-    else
-        return DynamicSmagorinsky(; averaging, minimum_numerator = 0, kwargs...)
-    end
-end
-
-"""
-    seed_lagrangian_averages!(model; initial_coefficient = 0.16, reference_strain_rate = 0.01)
-
-Initialize the Lagrangian averages of the dynamic Smagorinsky closure as
-
-    𝒥ᴹᴹ = M²,   𝒥ᴸᴹ = initial_coefficient² M²,   M = 2 Δ² reference_strain_rate²,
-
-where `Δ` is the filter width of the smallest cell. This does nothing for other closures.
-
-Oceananigans initializes `𝒥ᴹᴹ` with the domain mean of `MᵢⱼMᵢⱼ`, which is zero for a fluid at rest
-or in uniform motion, the initial state of every TABLES case. The averaging weight is proportional
-to `(𝒥ᴸᴹ 𝒥ᴹᴹ)^(1/8)`, so a zero `𝒥ᴹᴹ` never updates and the eddy viscosity stays zero for the whole
-run. With this seed the closure starts as a static Smagorinsky model with coefficient
-`initial_coefficient` and an averaging time scale of about `1.7 / reference_strain_rate`. The seed
-decays algebraically while the flow is weak, at fixed ratio `𝒥ᴸᴹ / 𝒥ᴹᴹ`, and is replaced by the
-Germano-identity products once the strain rate of the flow exceeds `reference_strain_rate`.
-"""
-function seed_lagrangian_averages!(model; initial_coefficient = 0.16, reference_strain_rate = 0.01)
-    model.closure isa LagrangianAveragedDynamicSmagorinsky || return nothing
-
-    grid = model.grid
-    FT = eltype(grid)
-    Δ = cbrt(minimum_xspacing(grid) * minimum_yspacing(grid) * minimum_zspacing(grid))
-    M² = convert(FT, (2 * Δ^2 * reference_strain_rate^2)^2)
-
-    fill!(parent(model.closure_fields.𝒥ᴹᴹ), M²)
-    fill!(parent(model.closure_fields.𝒥ᴸᴹ), convert(FT, initial_coefficient)^2 * M²)
-
-    return nothing
-end
-
-#####
 ##### Model
 #####
 
 """
     tables_model(grid, case; kwargs...)
 
-Return an `AtmosphereModel` for the TABLES `case` on `grid`.
+Return an `AtmosphereModel` for the TABLES `case` on `grid`. The model has no explicit
+subfilter-scale closure: the dissipation of the advection scheme takes its place.
 
 Keyword arguments
 =================
 
-- `advection`: advection scheme for momentum and scalars. Default: `WENO(order=9)`.
-- `closure`: subfilter-scale closure. Default: `tables_closure(grid)`, the dynamic Smagorinsky
-  closure with Lagrangian averaging, which is valid for the flat cases only.
+- `advection`: advection scheme for momentum and scalars. Default: `WENO(order=5)`.
 - `time_discretization`: default `SplitExplicitTimeDiscretization()`, Wicker-Skamarock RK3 with
   acoustic substeps chosen from an acoustic Courant number of 0.5.
 - `roughness_length` (m), `kinematic_heat_flux` (K m s⁻¹), `base_pressure` (Pa): Section 1.4.
@@ -349,8 +280,7 @@ Keyword arguments
   `(; rounding = StochasticRounding())` for single precision.
 """
 function tables_model(grid, case;
-                      advection = WENO(order = 9),
-                      closure = tables_closure(grid),
+                      advection = WENO(order = 5),
                       time_discretization = SplitExplicitTimeDiscretization(),
                       roughness_length = 0.1,
                       kinematic_heat_flux = 0.12,
@@ -401,7 +331,7 @@ function tables_model(grid, case;
 
     boundary_conditions = (ρu = ρu_bcs, ρv = ρv_bcs, ρθ = ρθ_bcs)
 
-    return AtmosphereModel(grid; dynamics, coriolis, advection, closure, forcing,
+    return AtmosphereModel(grid; dynamics, coriolis, advection, forcing,
                            boundary_conditions, timestepper_kwargs)
 end
 
@@ -418,8 +348,6 @@ Set the initial sounding of `case` plus potential temperature noise drawn unifor
 The density is set to `ρᵣ θᵣ / θ`, where `ρᵣ` and `θᵣ` are the reference density and the sounding.
 This leaves `ρθ`, and therefore the pressure, equal to the hydrostatically balanced reference,
 so the noise produces buoyancy but no acoustic transient.
-
-For a closure with Lagrangian averaging, the averages are seeded (see `seed_lagrangian_averages!`).
 """
 function set_tables_initial_condition!(model, case; noise_amplitude = 0.25, seed = 2026)
     grid = model.grid
@@ -441,9 +369,6 @@ function set_tables_initial_condition!(model, case; noise_amplitude = 0.25, seed
     interior(ρ) .= interior(ρᵣ) .* interior(ρ) ./ interior(θ)
 
     set!(model; ρ, θ, u = (x, y, z) -> wind(z), v = 0, w = 0, enforce_mass_conservation = false)
-
-    # `set!` initializes the closure fields from the velocities, which have no strain initially.
-    seed_lagrangian_averages!(model)
 
     return nothing
 end
@@ -477,10 +402,9 @@ function tables_simulation(model; Δt = 0.2, stop_time = 3hours, progress_interv
     function progress(sim)
         u, v, w = sim.model.velocities
         elapsed = 1e-9 * (time_ns() - wall_clock[])
-        @info @sprintf("iteration %d, time %s, wall time %s, max|u| %.2f, max|v| %.2f, max|w| %.2f m/s, max(νₑ) %.2e m²/s",
+        @info @sprintf("iteration %d, time %s, wall time %s, max|u| %.2f, max|v| %.2f, max|w| %.2f m/s",
                        iteration(sim), prettytime(sim), prettytime(elapsed),
-                       maximum(abs, u), maximum(abs, v), maximum(abs, w),
-                       maximum(sim.model.closure_fields.νₑ))
+                       maximum(abs, u), maximum(abs, v), maximum(abs, w))
         return nothing
     end
 
