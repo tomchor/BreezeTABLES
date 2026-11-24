@@ -6,17 +6,20 @@
 # The defaults follow the protocol at full size (512 x 1024 columns at 20 m, time step 0.2 s, 3 h).
 # Environment variables override them, mainly to run reduced configurations for testing:
 #
-#     TABLES_ARCH            cpu or gpu (default: gpu)
-#     TABLES_FLOAT_TYPE      Float64 or Float32 (default: Float64)
-#     TABLES_NX, TABLES_NY   number of columns in x and y (default: 512, 1024)
-#     TABLES_DX              horizontal spacing in m (default: 20)
-#     TABLES_DZ              vertical spacing in m below TABLES_UNIFORM_HEIGHT (default: 10)
-#     TABLES_UNIFORM_HEIGHT  height in m below which the vertical spacing is uniform (default: 3000)
-#     TABLES_MAX_DZ          largest vertical spacing in m (default: 40)
-#     TABLES_DT              time step in s (default: 0.2)
-#     TABLES_STOP_TIME       duration in s (default: 10800)
-#     TABLES_OUTPUT_DIR      output directory (default: output)
-#     TABLES_PICKUP          true to restart from the latest checkpoint (default: false)
+#     TABLES_ARCH               cpu or gpu (default: gpu)
+#     TABLES_FLOAT_TYPE         Float64 or Float32 (default: Float64)
+#     TABLES_NX, TABLES_NY      number of columns in x and y (default: 512, 1024)
+#     TABLES_DX                 horizontal spacing in m (default: 20)
+#     TABLES_DZ                 vertical spacing in m below TABLES_UNIFORM_HEIGHT (default: 10)
+#     TABLES_UNIFORM_HEIGHT     height in m below which the vertical spacing is uniform (default: 3000)
+#     TABLES_MAX_DZ             largest vertical spacing in m (default: 40)
+#     TABLES_DT                 time step in s (default: 0.2)
+#     TABLES_STOP_TIME          duration in s (default: 10800)
+#     TABLES_SECTION_INTERVAL   time in s between outputs of y-averaged sections (default: 600)
+#     TABLES_SLICE_INTERVAL     time in s between outputs of instantaneous x-z slices (default: 60)
+#     TABLES_PROGRESS_INTERVAL  iterations between progress messages (default: 500)
+#     TABLES_OUTPUT_DIR         output directory (default: output)
+#     TABLES_PICKUP             true to restart from the latest checkpoint (default: false)
 
 include(joinpath(@__DIR__, "tables.jl"))
 
@@ -59,7 +62,8 @@ set_tables_initial_condition!(model, case)
 @info "TABLES case $case_name" grid model
 @info @sprintf("Pressure imbalance of the initial state: %.2e Pa", maximum_pressure_imbalance(model))
 
-simulation = tables_simulation(model; Δt, stop_time)
+simulation = tables_simulation(model; Δt, stop_time,
+                               progress_interval = setting(Int, "TABLES_PROGRESS_INTERVAL", 500))
 
 #####
 ##### Output
@@ -77,15 +81,27 @@ u, v, w = model.velocities
 
 outputs = (; u, v, w, θ, ww = w^2, wθ = w * θ)
 
-# Averages along the ridge, on model levels, every 10 minutes
+# Averages along the ridge, on model levels
 sections = NamedTuple(name => Average(@at((Center, Center, Center), outputs[name]), dims = 2)
                       for name in keys(outputs))
+
+section_interval = setting(Float64, "TABLES_SECTION_INTERVAL", 10minutes)
 
 simulation.output_writers[:sections] = JLD2Writer(model, sections;
                                                   dir = output_dir,
                                                   filename = "$(case_name)_sections",
-                                                  schedule = IterationInterval(iterations(10minutes)),
+                                                  schedule = IterationInterval(iterations(section_interval)),
                                                   overwrite_files = !pickup)
+
+# Instantaneous x-z slices in the middle of the domain, on model levels (see animate.jl)
+slice_interval = setting(Float64, "TABLES_SLICE_INTERVAL", 1minute)
+
+simulation.output_writers[:slices] = JLD2Writer(model, (; u, v, w, θ);
+                                                dir = output_dir,
+                                                filename = "$(case_name)_slices",
+                                                indices = (:, Ny ÷ 2, :),
+                                                schedule = IterationInterval(iterations(slice_interval)),
+                                                overwrite_files = !pickup)
 
 # Checkpoints every 30 minutes. The one at 2.5 h is the start of the statistics window.
 simulation.output_writers[:checkpointer] = Checkpointer(model;
