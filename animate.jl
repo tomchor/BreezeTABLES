@@ -4,7 +4,7 @@
 #
 # Reads `case_name_slices.jld2` (instantaneous slices) and `case_name_sections.jld2` (averages along y)
 # from `output_directory` and writes `case_name.mp4` and `case_name_final.png` there. The two files
-# must have been saved at the same times (TABLES_SLICE_INTERVAL = TABLES_SECTION_INTERVAL).
+# must have been saved at the same times, which is the default of run_case.jl.
 #
 # Top panel: vertical velocity in the slice. Bottom panel: wind across the ridge, averaged along
 # the ridge. Lines are isentropes. Fields are interpolated from model levels to constant heights.

@@ -15,7 +15,7 @@
 #     TABLES_MAX_DZ             largest vertical spacing in m (default: 40)
 #     TABLES_DT                 time step in s (default: 0.2)
 #     TABLES_STOP_TIME          duration in s (default: 10800)
-#     TABLES_SECTION_INTERVAL   time in s between outputs of y-averaged sections (default: 600)
+#     TABLES_SECTION_INTERVAL   time in s between outputs of y-averaged sections (default: 60)
 #     TABLES_SLICE_INTERVAL     time in s between outputs of instantaneous x-z slices (default: 60)
 #     TABLES_PROGRESS_INTERVAL  iterations between progress messages (default: 500)
 #     TABLES_OUTPUT_DIR         output directory (default: output)
@@ -85,7 +85,7 @@ outputs = (; u, v, w, θ, ww = w^2, wθ = w * θ)
 sections = NamedTuple(name => Average(@at((Center, Center, Center), outputs[name]), dims = 2)
                       for name in keys(outputs))
 
-section_interval = setting(Float64, "TABLES_SECTION_INTERVAL", 10minutes)
+section_interval = setting(Float64, "TABLES_SECTION_INTERVAL", 1minute)
 
 simulation.output_writers[:sections] = JLD2Writer(model, sections;
                                                   dir = output_dir,
