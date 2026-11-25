@@ -18,10 +18,13 @@
 #     TABLES_SECTION_INTERVAL   time in s between outputs of y-averaged sections (default: 60)
 #     TABLES_SLICE_INTERVAL     time in s between outputs of instantaneous x-z slices (default: 60)
 #     TABLES_PROGRESS_INTERVAL  iterations between progress messages (default: 500)
+#     TABLES_STATISTICS_WINDOW  length in s of the averaging window at the end of the run (default: 1800)
+#     TABLES_STATISTICS_STRIDE  iterations between samples of the statistics (default: 1)
 #     TABLES_OUTPUT_DIR         output directory (default: output)
 #     TABLES_PICKUP             true to restart from the latest checkpoint (default: false)
 
 include(joinpath(@__DIR__, "tables.jl"))
+include(joinpath(@__DIR__, "protocol_output.jl"))
 
 setting(T, name, default) = haskey(ENV, name) ? parse(T, ENV[name]) : default
 
@@ -66,10 +69,7 @@ simulation = tables_simulation(model; Δt, stop_time,
                                progress_interval = setting(Int, "TABLES_PROGRESS_INTERVAL", 500))
 
 #####
-##### Output
-#####
-##### This is monitoring output for checking that a case runs correctly. The statistics, snapshots
-##### and spectra requested in Sections 3 to 5 of the protocol are not implemented yet.
+##### Monitoring output, for checking that a case runs correctly
 #####
 
 pickup = get(ENV, "TABLES_PICKUP", "false") == "true"
@@ -109,4 +109,21 @@ simulation.output_writers[:checkpointer] = Checkpointer(model;
                                                         prefix = "$(case_name)_checkpoint",
                                                         schedule = IterationInterval(iterations(30minutes)))
 
+#####
+##### Output requested by the protocol (see protocol_output.jl)
+#####
+
+# Statistics averaged over y and over the last 30 minutes (Sections 3 and 4)
+statistics_window = setting(Float64, "TABLES_STATISTICS_WINDOW", 30minutes)
+statistics = TurbulenceStatistics(grid; window_start = stop_time - statistics_window)
+add_callback!(simulation, statistics, IterationInterval(setting(Int, "TABLES_STATISTICS_STRIDE", 1)))
+
 run!(simulation; pickup)
+
+statistics_file = write_statistics(joinpath(output_dir, "$(case_name)_statistics.nc"), statistics, model; case_name)
+@info @sprintf("Wrote %s with %d samples from t = %s to t = %s", statistics_file, statistics.samples[],
+               prettytime(statistics.first_sample_time[]), prettytime(statistics.last_sample_time[]))
+
+# Snapshot of the final state (Section 3.1)
+snapshot_file = write_snapshot(joinpath(output_dir, "$(case_name)_snapshot.nc"), model; case_name)
+@info "Wrote $snapshot_file"
