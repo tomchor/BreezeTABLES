@@ -1,0 +1,8 @@
+# Only the files that define the simulations and their output are tracked: the soundings
+# and the interpolation routine. The rest of the organizers' project folder (manuscript
+# draft, figures, meeting notes, LaTeX files) stays local.
+/*
+!/.gitignore
+!/README.md
+!/ModelSetUps/
+!/interpolation_routine/
