@@ -14,6 +14,7 @@
 
 using Breeze
 using Oceananigans
+using Oceananigans: prognostic_state, restore_prognostic_state!
 using Oceananigans.Architectures: architecture, on_architecture
 using Oceananigans.Grids: znode
 using Oceananigans.Operators: ℑxᶜᵃᵃ, ℑyᵃᶜᵃ, ℑzᵃᵃᶜ, Δzᶜᶜᶜ
@@ -97,8 +98,8 @@ Every call after `window_start` takes one sample of the model state. All fields 
 cell centers, with the velocity components interpolated there. `write_statistics` forms the
 statistics and writes them.
 
-The accumulated sums are not saved in checkpoints. A simulation that is interrupted inside the
-averaging window has to be restarted from a checkpoint at or before `window_start`.
+The accumulated sums are saved in the checkpoints of the simulation and restored from them, so a
+simulation can be interrupted and restarted inside the averaging window.
 """
 struct TurbulenceStatistics{A, V, W}
     moment_sums :: A            # (Nx, Nz, number_of_moments): sums over y and over the samples
@@ -124,9 +125,23 @@ end
 function (statistics::TurbulenceStatistics)(simulation)
     # Half a time step of tolerance, because the model time is a sum of floating-point steps
     time(simulation) ≥ statistics.window_start - simulation.Δt / 2 || return nothing
+
+    # When rounding leaves a sliver of time before the stop time, the simulation skips that step
+    # and calls back a second time at its last iteration. That state has already been sampled.
+    time(simulation) < statistics.last_sample_time[] + simulation.Δt / 2 && return nothing
+
     sample!(statistics, simulation.model)
     return nothing
 end
+
+# What a checkpoint holds of the statistics
+restart_state(statistics::TurbulenceStatistics) =
+    (; statistics.moment_sums, statistics.friction_velocity_sum,
+       statistics.samples, statistics.first_sample_time, statistics.last_sample_time)
+
+Oceananigans.prognostic_state(statistics::TurbulenceStatistics) = prognostic_state(restart_state(statistics))
+Oceananigans.restore_prognostic_state!(statistics::TurbulenceStatistics, from) = restore_prognostic_state!(restart_state(statistics), from)
+Oceananigans.restore_prognostic_state!(::TurbulenceStatistics, ::Nothing) = nothing
 
 "Add one sample of the state of `model` to `statistics`."
 function sample!(statistics::TurbulenceStatistics, model)

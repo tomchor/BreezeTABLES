@@ -22,6 +22,10 @@
 #     TABLES_STATISTICS_STRIDE  iterations between samples of the statistics (default: 1)
 #     TABLES_OUTPUT_DIR         output directory (default: output)
 #     TABLES_PICKUP             true to restart from the latest checkpoint (default: false)
+#     TABLES_WALL_TIME_LIMIT    wall time in s after which the run stops and writes a checkpoint, to be
+#                               continued with TABLES_PICKUP=true (default: no limit)
+#
+# jobs/submit_case.sh runs a case on a Casper GPU as a chain of such runs.
 
 include(joinpath(@__DIR__, "tables.jl"))
 include(joinpath(@__DIR__, "protocol_output.jl"))
@@ -68,11 +72,19 @@ set_tables_initial_condition!(model, case)
 simulation = tables_simulation(model; Δt, stop_time,
                                progress_interval = setting(Int, "TABLES_PROGRESS_INTERVAL", 500))
 
+# A run with a wall time limit stops by itself before its job is killed
+simulation.wall_time_limit = setting(Float64, "TABLES_WALL_TIME_LIMIT", Inf)
+
 #####
 ##### Monitoring output, for checking that a case runs correctly
 #####
 
 pickup = get(ENV, "TABLES_PICKUP", "false") == "true"
+
+# `run!` only warns when it finds no checkpoint to pick up, and then starts from the initial condition
+if pickup && !(isdir(output_dir) && any(startswith("$(case_name)_checkpoint_iteration"), readdir(output_dir)))
+    error("TABLES_PICKUP=true, but there is no checkpoint of $case_name in $output_dir")
+end
 
 iterations(interval) = max(1, round(Int, interval / Δt))
 
@@ -113,17 +125,26 @@ simulation.output_writers[:checkpointer] = Checkpointer(model;
 ##### Output requested by the protocol (see protocol_output.jl)
 #####
 
-# Statistics averaged over y and over the last 30 minutes (Sections 3 and 4)
+# Statistics averaged over y and over the last 30 minutes (Sections 3 and 4). The callback has a
+# name so that a restart finds its sums in the checkpoint.
 statistics_window = setting(Float64, "TABLES_STATISTICS_WINDOW", 30minutes)
 statistics = TurbulenceStatistics(grid; window_start = stop_time - statistics_window)
-add_callback!(simulation, statistics, IterationInterval(setting(Int, "TABLES_STATISTICS_STRIDE", 1)))
+add_callback!(simulation, statistics, IterationInterval(setting(Int, "TABLES_STATISTICS_STRIDE", 1)); name = :statistics)
 
-run!(simulation; pickup)
+# A run that the wall time limit can stop also writes a checkpoint where it stops
+run!(simulation; pickup, checkpoint_at_end = isfinite(simulation.wall_time_limit))
 
-statistics_file = write_statistics(joinpath(output_dir, "$(case_name)_statistics.nc"), statistics, model; case_name)
-@info @sprintf("Wrote %s with %d samples from t = %s to t = %s", statistics_file, statistics.samples[],
-               prettytime(statistics.first_sample_time[]), prettytime(statistics.last_sample_time[]))
+if time(simulation) < simulation.stop_time
+    @info "Stopped by the wall time limit at t = $(prettytime(simulation)). Continue with TABLES_PICKUP=true."
+else
+    statistics_file = write_statistics(joinpath(output_dir, "$(case_name)_statistics.nc"), statistics, model; case_name)
+    @info @sprintf("Wrote %s with %d samples from t = %s to t = %s", statistics_file, statistics.samples[],
+                   prettytime(statistics.first_sample_time[]), prettytime(statistics.last_sample_time[]))
 
-# Snapshot of the final state (Section 3.1)
-snapshot_file = write_snapshot(joinpath(output_dir, "$(case_name)_snapshot.nc"), model; case_name)
-@info "Wrote $snapshot_file"
+    # Snapshot of the final state (Section 3.1)
+    snapshot_file = write_snapshot(joinpath(output_dir, "$(case_name)_snapshot.nc"), model; case_name)
+    @info "Wrote $snapshot_file"
+
+    # This file tells jobs/run_case.pbs that the case is complete
+    touch(joinpath(output_dir, "$(case_name).done"))
+end
