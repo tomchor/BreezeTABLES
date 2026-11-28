@@ -16,7 +16,7 @@
 #     TABLES_DT                 time step in s (default: 0.2)
 #     TABLES_STOP_TIME          duration in s (default: 10800)
 #     TABLES_SECTION_INTERVAL   time in s between outputs of y-averaged sections (default: 60)
-#     TABLES_SLICE_INTERVAL     time in s between outputs of instantaneous x-z slices (default: 60)
+#     TABLES_SLICE_INTERVAL     time in s between outputs of instantaneous x-z and x-y slices (default: 60)
 #     TABLES_PROGRESS_INTERVAL  iterations between progress messages (default: 500)
 #     TABLES_STATISTICS_WINDOW  length in s of the averaging window at the end of the run (default: 1800)
 #     TABLES_STATISTICS_STRIDE  iterations between samples of the statistics (default: 1)
@@ -105,15 +105,24 @@ simulation.output_writers[:sections] = JLD2Writer(model, sections;
                                                   schedule = IterationInterval(iterations(section_interval)),
                                                   overwrite_files = !pickup)
 
-# Instantaneous x-z slices in the middle of the domain, on model levels (see animate.jl)
+# Instantaneous slices on model levels (see animate.jl): the x-z slice in the middle of the domain
+# and the x-y slice on the level whose w is closest to 500 m. There u, v and θ are half a cell higher.
+slices = (; u, v, w, θ)
 slice_interval = setting(Float64, "TABLES_SLICE_INTERVAL", 1minute)
 
-simulation.output_writers[:slices] = JLD2Writer(model, (; u, v, w, θ);
+simulation.output_writers[:slices] = JLD2Writer(model, slices;
                                                 dir = output_dir,
                                                 filename = "$(case_name)_slices",
                                                 indices = (:, Ny ÷ 2, :),
                                                 schedule = IterationInterval(iterations(slice_interval)),
                                                 overwrite_files = !pickup)
+
+simulation.output_writers[:xy_slices] = JLD2Writer(model, slices;
+                                                   dir = output_dir,
+                                                   filename = "$(case_name)_xy_slices",
+                                                   indices = (:, :, argmin(abs.(z_faces .- 500))),
+                                                   schedule = IterationInterval(iterations(slice_interval)),
+                                                   overwrite_files = !pickup)
 
 # Checkpoints every 30 minutes. The one at 2.5 h is the start of the statistics window.
 simulation.output_writers[:checkpointer] = Checkpointer(model;
