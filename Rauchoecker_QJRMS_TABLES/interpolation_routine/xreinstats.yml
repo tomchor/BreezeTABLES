@@ -1,0 +1,13 @@
+name: xreinstats
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - matplotlib
+  - xarray-einstats
+  - scipy
+  - ipykernel
+  - netcdf4
+  - bottleneck
+  - dask
+

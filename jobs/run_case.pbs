@@ -1,0 +1,74 @@
+#!/bin/bash -l
+# One segment of a TABLES case on a Casper GPU: a run of run_case.jl that stops before the wall time of
+# its job. When the segment ends it submits the next one, which continues from the last checkpoint,
+# or the job that animates the case once it is complete.
+#
+# Submitted by submit_case.sh, which sets the resources, the name and the log file on the qsub
+# command line.
+#
+# Variables passed with `qsub -v`:
+#   RUN_DIR   directory of the run: holds settings.env and the copy of the code in code/, both made by
+#             submit_case.sh, and gets the output
+#   SEGMENT   1 starts the case from its initial condition; later segments pick up the latest checkpoint
+#PBS -A UMCP0061
+#PBS -q casper
+#PBS -l job_priority=regular
+#PBS -r n
+#PBS -j oe
+
+set -eo pipefail
+
+# A crash of a 3D run otherwise leaves a core dump of hundreds of GB
+ulimit -c 0
+
+# RUN, CASE, CODE, MAX_SEGMENTS and the TABLES_* settings of run_case.jl
+set -a
+source "$RUN_DIR/settings.env"
+set +a
+
+export TABLES_OUTPUT_DIR=$RUN_DIR
+
+# CUDA.jl is pinned to the local runtime (LocalPreferences.toml), so a cuda module must be loaded.
+# It cannot be newer than the driver supports: cuda/12.9.0 of ncarenv/25.10 is too new.
+module --force purge
+module load ncarenv/23.10 cuda/12.2.1
+
+export JULIA_DEPOT_PATH=/glade/work/$USER/.julia
+export JULIA_CPU_TARGET=generic
+
+julia_command=(julia +1.13 --startup-file=no --project="$CODE" --threads="${NCPUS:-8}" --pkgimages=no)
+
+echo "job $PBS_JOBID, segment $SEGMENT of $RUN on $(hostname), $(date)"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+echo "code in $CODE, copied from $(cat "$CODE/source")"
+
+if [ "$SEGMENT" -eq 1 ]; then
+    if compgen -G "$RUN_DIR/*.jld2" > /dev/null; then
+        echo "$RUN_DIR already holds output, which segment 1 would overwrite"
+        exit 1
+    fi
+    export TABLES_PICKUP=false
+    "${julia_command[@]}" -e 'using Pkg; Pkg.precompile(); using CUDA; CUDA.versioninfo()'
+else
+    export TABLES_PICKUP=true
+fi
+
+# GPU memory and utilization in this log, every 10 minutes
+nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader --loop=600 &
+gpu_monitor=$!
+trap 'kill $gpu_monitor 2> /dev/null || true' EXIT
+
+time "${julia_command[@]}" "$CODE/run_case.jl" "$CASE" 2>&1 | tee "$RUN_DIR/logs/segment$SEGMENT.out"
+
+if [ -e "$RUN_DIR/$CASE.done" ]; then
+    echo "$CASE is complete: submitting its animation"
+    "$CODE/jobs/submit_case.sh" --animate "$RUN_DIR"
+elif [ "$SEGMENT" -lt "$MAX_SEGMENTS" ]; then
+    echo "$CASE is not complete: submitting segment $((SEGMENT + 1))"
+    "$CODE/jobs/submit_case.sh" --continue "$RUN_DIR" $((SEGMENT + 1))
+else
+    echo "$CASE is not complete after $MAX_SEGMENTS segments"
+    exit 1
+fi
+
+echo "finished $(date)"

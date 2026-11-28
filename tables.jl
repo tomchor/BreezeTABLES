@@ -34,8 +34,8 @@ Potential temperature of the flat and 100 m ridge cases: a mixed layer capped by
 with constant stratification above.
 
 The protocol specifies a 4 K inversion on top of a 1000 m deep mixed layer but not its thickness.
-The default of 50 m is read from Figure 1 of the protocol and should be replaced by the value in
-the sounding files `input_sounding_teamx_*` once they are available.
+The default of 50 m is the thickness in the sounding files of the organizers
+(`Rauchoecker_QJRMS_TABLES/ModelSetUps/TABLES_soundings`), which the defaults reproduce at every level.
 """
 struct MixedLayerSounding{FT}
     mixed_layer_potential_temperature :: FT
