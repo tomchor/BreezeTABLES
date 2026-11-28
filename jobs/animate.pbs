@@ -1,9 +1,10 @@
 #!/bin/bash -l
 # Animate a TABLES run with animate.jl, on a Casper CPU node. Submitted by submit_case.sh.
 #
-# Variable passed with `qsub -v`:
-#   RUN_DIR   directory of the run: holds settings.env, the copy of the code in code/ and the output,
-#             and gets the animation
+# Variables passed with `qsub -v`:
+#   RUN_DIR          directory of the run: holds settings.env and the output, and gets the animation
+#   ANIMATION_CODE   directory of animate.jl and of its Julia environment: the repository, or the copy
+#                    of the code in a run directory
 #PBS -A UMCP0061
 #PBS -q casper
 #PBS -l job_priority=regular
@@ -14,7 +15,7 @@
 
 set -eo pipefail
 
-# RUN, CASE and CODE
+# RUN and CASE
 set -a
 source "$RUN_DIR/settings.env"
 set +a
@@ -26,8 +27,9 @@ export JULIA_DEPOT_PATH=/glade/work/$USER/.julia
 export JULIA_CPU_TARGET=generic
 
 echo "job $PBS_JOBID, animation of $RUN on $(hostname), $(date)"
+echo "animate.jl of $ANIMATION_CODE"
 
-time julia +1.13 --startup-file=no --project="$CODE" --threads="${NCPUS:-4}" --pkgimages=no \
-     "$CODE/animate.jl" "$RUN_DIR" "$CASE" 2>&1 | tee "$RUN_DIR/logs/animation.out"
+time julia +1.13 --startup-file=no --project="$ANIMATION_CODE" --threads="${NCPUS:-4}" --pkgimages=no \
+     "$ANIMATION_CODE/animate.jl" "$RUN_DIR" "$CASE" 2>&1 | tee "$RUN_DIR/logs/animation.out"
 
 echo "finished $(date)"

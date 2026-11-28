@@ -29,7 +29,14 @@
 #
 #     jobs/submit_case.sh --continue <run directory> <segment>
 #     jobs/submit_case.sh --animate <run directory>
+#
+# A segment always uses the copy of the code in the run directory. The animation uses the animate.jl
+# that belongs to the submit_case.sh that is called: called from the repository, --animate animates
+# a run again after animate.jl has changed.
 set -euo pipefail
+
+# The repository, or its copy in a run directory when a job of the chain calls this script
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 submit_segment() { # <run directory> <segment>
     source "$1/settings.env"
@@ -42,7 +49,8 @@ submit_segment() { # <run directory> <segment>
 
 submit_animation() { # <run directory>
     source "$1/settings.env"
-    qsub -N "$RUN-movie" -o "$1/logs/animation.pbs.log" -v "RUN_DIR=$1" "$CODE/jobs/animate.pbs"
+    qsub -N "$RUN-movie" -o "$1/logs/animation.pbs.log" -v "RUN_DIR=$1,ANIMATION_CODE=$repository" \
+         "$repository/jobs/animate.pbs"
 }
 
 case ${1:-} in
@@ -67,7 +75,6 @@ for setting in "$@"; do
     esac
 done
 
-repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 run_directory=/glade/derecho/scratch/$USER/BreezeTABLES/$RUN
 
 if [ -e "$run_directory/settings.env" ]; then
